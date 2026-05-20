@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cattle-phenotyping"
+version = "0.2.0"
+description = "Cattle phenotyping pipeline: detect, segment, and predict morphometrics and weight from side-view images."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cattle Phenotyping Project" }]
+dependencies = [
+    "ultralytics>=8.0.0",
+    "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "xgboost>=2.0.0",
+    "scikit-learn>=1.3.0",
+    "pandas>=2.0.0",
+    "streamlit>=1.28.0",
+    "Pillow>=10.0.0",
+    "matplotlib>=3.7.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+cattle-phenotype = "cattle_phenotyping.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cattle_phenotyping*"]
+exclude = ["tests*", "configs*", "data*", "docs*", "runs*", "saved_models*", "weights*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

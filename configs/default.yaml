@@ -1,0 +1,68 @@
+# Default config for the cattle phenotyping pipeline.
+#
+# All paths are resolved relative to the project root (directory containing
+# this `configs/` folder) unless an absolute path is given. Override values
+# by passing --config path/to/override.yaml on the command line.
+
+paths:
+  data_dir: data/images
+  labels_csv: data/labels.csv
+  splits_dir: data/splits
+  saved_models_dir: saved_models
+  runs_dir: runs
+  weights_dir: weights
+
+pipeline:
+  # All images are resized to this width (keeping aspect ratio) before
+  # being passed into the detector. Matches train- and inference-time
+  # behavior so feature distributions stay consistent.
+  target_width: 1024
+
+detector:
+  # YOLOv8n weight file; downloaded automatically by Ultralytics on first
+  # use. Pin to a vendored copy under weights/ for reproducibility once
+  # available.
+  model_path: yolov8n.pt
+  confidence: 0.3
+  # COCO class id for "cow".
+  cow_class_id: 19
+
+segmenter:
+  # SAM ViT-B is the legacy default. Phase 3 replaces this with a
+  # fine-tuned segmenter; the legacy stage stays selectable for one
+  # release via `model_type: sam_vit_b`.
+  model_type: sam_vit_b
+  checkpoint: sam_vit_b_01ec64.pth
+  # SHA-256 of the upstream file. The loader will refuse to use a
+  # checkpoint that doesn't match.
+  checkpoint_sha256: null  # TODO: fill after downloading the canonical file
+  allow_auto_download: false
+
+trait_model:
+  # XGBoost hyperparameters. Per-trait overrides land in `traits:` below.
+  weight:
+    n_estimators: 100
+    max_depth: 4
+    learning_rate: 0.1
+  bcs:
+    n_estimators: 100
+    max_depth: 4
+    learning_rate: 0.1
+  morphometric:
+    n_estimators: 100
+    max_depth: 3
+    learning_rate: 0.05
+
+training:
+  seed: 42
+  cv:
+    n_splits: 5
+    # When duplicate measurement tuples are detected and no animal_id
+    # column exists, fall back to group-aware splits using the dup tuple
+    # as the group key.
+    use_group_kfold_when_groups_inferred: true
+
+logging:
+  level: INFO
+  # When set, logs are also written to this file inside the run dir.
+  file_in_run_dir: pipeline.log
