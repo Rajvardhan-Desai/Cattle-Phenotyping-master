@@ -337,63 +337,24 @@ def _count_reasons(results: list[ScaleResult]) -> dict[str, int]:
     return counts
 
 
-def _load_area_for_worker(job: tuple[int, str, str]) -> tuple[int, int | None]:
-    """Top-level worker function used by ProcessPoolExecutor.
-
-    Takes a ``(job_idx, mask_path_str, batch)`` tuple so the executor's
-    submit/map can pickle plain strings instead of full ``KaggleSample``
-    objects. Returns ``(job_idx, area_px or None)`` so results can be
-    re-associated with their input in any completion order.
-    """
-    job_idx, mask_path_str, batch = job
-    return job_idx, sticker_area_px_from_file(Path(mask_path_str), batch=batch)
-
-
-def _load_areas_serial(
-    loadable: list[ScaleResult],
-) -> tuple[list[tuple[ScaleResult, int]], int]:
-    out: list[tuple[ScaleResult, int]] = []
-    n_missing = 0
-    for r in loadable:
-        assert r.sample.mask_path is not None  # filtered upstream
-        area = sticker_area_px_from_file(r.sample.mask_path, batch=r.sample.batch)
-        if area is None:
-            n_missing += 1
-            continue
-        out.append((r, area))
-    return out, n_missing
-
-
-def _load_areas_parallel(
+def _load_areas_for_results(
     loadable: list[ScaleResult],
     *,
     workers: int,
 ) -> tuple[list[tuple[ScaleResult, int]], int]:
-    """Load sticker mask areas in parallel via ProcessPoolExecutor.
+    """Load sticker areas for a list of resolved ScaleResults.
 
-    GPU is intentionally not used — this is disk-I/O bound, and per-image
-    work (a single ``np.abs(diffs) <= tol`` over ~2.7M pixels) is fast enough
-    that host↔device transfer for a CUDA path would dominate. Process-level
-    parallelism for the PIL decode is the right lever.
+    Uses :func:`cattle_phenotyping.data.mask_io.load_sticker_areas` so the
+    parallelism logic is shared with the Schaeffer baseline evaluator.
     """
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from cattle_phenotyping.data.mask_io import load_sticker_areas
 
     jobs = [
-        (idx, str(r.sample.mask_path), r.sample.batch)
+        (idx, r.sample.mask_path, r.sample.batch)
         for idx, r in enumerate(loadable)
         if r.sample.mask_path is not None
     ]
-    by_idx: dict[int, int | None] = {}
-    n_done = 0
-    log_every = max(1, len(jobs) // 20)
-
-    with ProcessPoolExecutor(max_workers=workers) as ex:
-        for fut in as_completed(ex.submit(_load_area_for_worker, j) for j in jobs):
-            idx, area = fut.result()
-            by_idx[idx] = area
-            n_done += 1
-            if n_done % log_every == 0:
-                log.info("Mask load progress: %d / %d", n_done, len(jobs))
+    by_idx = load_sticker_areas(jobs, workers=workers)
 
     out: list[tuple[ScaleResult, int]] = []
     n_missing = 0
@@ -463,10 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         log.info("Mask jobs to run: %d (out of %d resolved samples)", len(loadable), len(results))
 
-        if args.workers > 1:
-            scales_with_areas, n_missing = _load_areas_parallel(loadable, workers=args.workers)
-        else:
-            scales_with_areas, n_missing = _load_areas_serial(loadable)
+        scales_with_areas, n_missing = _load_areas_for_results(loadable, workers=args.workers)
 
         log.info(
             "Loaded %d mask areas (%d missing/failed).",
