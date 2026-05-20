@@ -278,3 +278,50 @@ def test_flag_outliers_empty_input():
 def test_default_sticker_constant_matches_calibration():
     """Pin the calibration value so a future drift causes a test failure."""
     assert DEFAULT_STICKER_AREA_CM2 == pytest.approx(18.21)
+
+
+# --------------------------------------------- per-batch sticker calibration
+
+
+def test_evaluate_sample_uses_per_batch_mapping():
+    """A {batch: cm²} mapping should produce different scales per batch.
+
+    Geometry held fixed: chord 100 px, length 200 px, sticker area 400 px.
+    With cm²=100 → px_per_cm=2; with cm²=400 → px_per_cm=1. The latter
+    doubles cm distances, which raises Schaeffer's HG²×BL output by 8×.
+    """
+    kps = {
+        "front_girth_top": _kp(0, 0),
+        "front_girth_bottom": _kp(0, 100),
+        "shoulderbone": _kp(0, 0),
+        "pinbone": _kp(200, 0),
+    }
+    b3 = _make_sample(kps=kps, weight_kg=100.0, batch="B3")
+    b4 = _make_sample(kps=kps, weight_kg=100.0, batch="B4")
+
+    by_batch = {"B3": 100.0, "B4": 400.0}
+    rec_b3 = evaluate_sample(b3, sticker_area_cm2=by_batch, sticker_area_px=400)
+    rec_b4 = evaluate_sample(b4, sticker_area_cm2=by_batch, sticker_area_px=400)
+
+    assert rec_b3.predicted_weight_kg is not None
+    assert rec_b4.predicted_weight_kg is not None
+    # cm²×4 → px_per_cm halved → cm distances doubled → weight × 2³ = 8.
+    assert rec_b4.predicted_weight_kg == pytest.approx(8.0 * rec_b3.predicted_weight_kg, rel=1e-9)
+
+
+def test_evaluate_sample_missing_batch_in_mapping_skips():
+    sample = _make_sample(batch="B2")
+    rec = evaluate_sample(
+        sample, sticker_area_cm2={"B3": 15.0, "B4": 80.0}, sticker_area_px=400,
+    )
+    assert rec.predicted_weight_kg is None
+    assert "B2" in rec.skip_reason
+    assert "no sticker cm" in rec.skip_reason.lower()
+
+
+def test_evaluate_sample_scalar_still_works():
+    """Scalar path is unchanged for backwards compat."""
+    sample = _make_sample(weight_kg=200.0)
+    rec = evaluate_sample(sample, sticker_area_cm2=18.21, sticker_area_px=400)
+    assert rec.predicted_weight_kg is not None
+    assert rec.px_per_cm == pytest.approx(math.sqrt(400 / 18.21), rel=1e-9)

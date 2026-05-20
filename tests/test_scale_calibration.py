@@ -17,6 +17,7 @@ from cattle_phenotyping.pipeline.scale_calibration import (
     DEFAULT_COLOR_TOLERANCE,
     STICKER_RGB_BY_BATCH,
     aggregate_sticker_size,
+    aggregate_sticker_size_by_batch,
     invert_schaeffer_for_px_per_cm,
     iter_sample_scales,
     per_sample_scale,
@@ -251,6 +252,62 @@ def test_aggregate_sticker_size_returns_none_when_empty():
     assert aggregate_sticker_size([]) is None
     # Only-invalid input also returns None.
     assert aggregate_sticker_size([(_StubResult(None), 100)]) is None
+
+
+# ------------------------------------- Stage B aggregation grouped by batch
+
+
+class _BatchedStubResult:
+    """Stub with the bare attributes the per-batch aggregator inspects."""
+    def __init__(self, px_per_cm, batch):
+        self.px_per_cm = px_per_cm
+
+        class _S:
+            pass
+        self.sample = _S()
+        self.sample.batch = batch
+
+
+def test_aggregate_by_batch_groups_independently():
+    """B3 cm² ≈ 15 and B4 cm² ≈ 80 should not contaminate each other.
+
+    Mirrors the 2026-05-20 baseline finding where the global median
+    18.21 cm² was wrong for both batches because the dataset is bimodal.
+    """
+    pairs = []
+    # 5 B3 samples implying a 15 cm² sticker.
+    for pxcm in (1.0, 2.0, 3.0, 4.0, 5.0):
+        pairs.append((_BatchedStubResult(pxcm, "B3"), int(round(pxcm * pxcm * 15))))
+    # 5 B4 samples implying an 80 cm² sticker.
+    for pxcm in (1.0, 2.0, 3.0, 4.0, 5.0):
+        pairs.append((_BatchedStubResult(pxcm, "B4"), int(round(pxcm * pxcm * 80))))
+
+    by_batch = aggregate_sticker_size_by_batch(pairs)
+    assert set(by_batch.keys()) == {"B3", "B4"}
+    assert by_batch["B3"].median_area_cm2 == pytest.approx(15.0, abs=0.5)
+    assert by_batch["B4"].median_area_cm2 == pytest.approx(80.0, abs=0.5)
+    assert by_batch["B3"].n_samples == 5
+    assert by_batch["B4"].n_samples == 5
+
+
+def test_aggregate_by_batch_skips_invalid_rows_per_bucket():
+    pairs = [
+        (_BatchedStubResult(None, "B3"), 100),   # invalid → dropped
+        (_BatchedStubResult(2.0, "B3"), 60),     # 15 cm²
+        (_BatchedStubResult(2.0, "B4"), 0),      # zero area → dropped
+        (_BatchedStubResult(2.0, "B4"), 320),    # 80 cm²
+    ]
+    by_batch = aggregate_sticker_size_by_batch(pairs)
+    assert by_batch["B3"].median_area_cm2 == pytest.approx(15.0)
+    assert by_batch["B4"].median_area_cm2 == pytest.approx(80.0)
+
+
+def test_aggregate_by_batch_empty_returns_empty_dict():
+    assert aggregate_sticker_size_by_batch([]) == {}
+    # Only-invalid rows produce no batches.
+    assert aggregate_sticker_size_by_batch(
+        [(_BatchedStubResult(None, "B3"), 100)]
+    ) == {}
 
 
 # ------------------------------------------------------ outlier identifiability

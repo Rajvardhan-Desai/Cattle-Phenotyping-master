@@ -115,14 +115,42 @@ def iter_split_samples(
 # ------------------------------------------------------------- evaluation
 
 
+def _resolve_sticker_area_cm2(
+    sticker_area_cm2: float | dict[str, float],
+    batch: str,
+) -> float | None:
+    """Pick the cm^2 constant for one sample's batch.
+
+    Accepts either a single float (one global constant) or a dict
+    mapping batch -> cm^2 (the post-2026-05-20 per-batch calibration).
+    Returns ``None`` when a dict is passed but doesn't include this batch.
+    """
+    if isinstance(sticker_area_cm2, dict):
+        return sticker_area_cm2.get(batch)
+    return float(sticker_area_cm2)
+
+
 def evaluate_sample(
     sample: KaggleSample,
     *,
-    sticker_area_cm2: float,
+    sticker_area_cm2: float | dict[str, float],
     sticker_area_px: int | None,
     girth_multiplier: float = math.pi,
 ) -> SchaefferRecord:
-    """Forward-Schaeffer one sample using the sticker-derived scale."""
+    """Forward-Schaeffer one sample using the sticker-derived scale.
+
+    ``sticker_area_cm2`` may be a single float (global constant) or a
+    ``{batch: cm^2}`` mapping for per-batch calibration. A sample whose
+    batch isn't in the mapping is recorded as skipped.
+    """
+    resolved_cm2 = _resolve_sticker_area_cm2(sticker_area_cm2, sample.batch)
+    if resolved_cm2 is None:
+        return SchaefferRecord(
+            sample=sample, labelled_weight_kg=sample.weight_kg or float("nan"),
+            predicted_weight_kg=None, sticker_area_px=sticker_area_px,
+            px_per_cm=None, residual_kg=None,
+            skip_reason=f"no sticker cm^2 calibration for batch {sample.batch}",
+        )
     if sample.weight_kg is None:
         return SchaefferRecord(
             sample=sample, labelled_weight_kg=float("nan"),
@@ -146,7 +174,7 @@ def evaluate_sample(
             skip_reason="zero sticker pixels detected",
         )
 
-    px_per_cm = math.sqrt(sticker_area_px / sticker_area_cm2)
+    px_per_cm = math.sqrt(sticker_area_px / resolved_cm2)
     pred = schaeffer_from_keypoints(
         sample.keypoints, px_per_cm,
         girth_chord_to_circumference=girth_multiplier,
@@ -282,7 +310,7 @@ def evaluate(
     dataset_root: Path,
     split_csv: Path,
     *,
-    sticker_area_cm2: float = DEFAULT_STICKER_AREA_CM2,
+    sticker_area_cm2: float | dict[str, float] = DEFAULT_STICKER_AREA_CM2,
     girth_multiplier: float = math.pi,
     workers: int = 4,
     batches: tuple[str, ...] = ("B3", "B4"),
@@ -332,10 +360,14 @@ def evaluate(
         if r.skip_reason:
             skip_counts[r.skip_reason] += 1
 
+    if isinstance(sticker_area_cm2, dict):
+        sticker_cfg: float | dict[str, float] = dict(sticker_area_cm2)
+    else:
+        sticker_cfg = float(sticker_area_cm2)
     report: dict = {
         "config": {
             "split_csv": str(split_csv),
-            "sticker_area_cm2": sticker_area_cm2,
+            "sticker_area_cm2": sticker_cfg,
             "girth_multiplier": girth_multiplier,
             "batches": list(batches),
             "views": list(views),
@@ -371,7 +403,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split-csv", required=True, help="Path to the split CSV (typically data/splits/test.csv)")
     parser.add_argument(
         "--sticker-area-cm2", type=float, default=DEFAULT_STICKER_AREA_CM2,
-        help=f"Sticker physical area in cm^2; default {DEFAULT_STICKER_AREA_CM2} (back-derived).",
+        help=f"Sticker physical area in cm^2; default {DEFAULT_STICKER_AREA_CM2} (back-derived). "
+             "Ignored when --sticker-area-by-batch-json is provided.",
+    )
+    parser.add_argument(
+        "--sticker-area-by-batch-json", default=None,
+        help="Path to a JSON file mapping batch -> sticker cm^2 "
+             "(e.g. {\"B3\": 15.3, \"B4\": 79.0}). When set, overrides --sticker-area-cm2 "
+             "and forwards Schaeffer with one constant per batch.",
     )
     parser.add_argument(
         "--girth-multiplier", type=float, default=math.pi,
@@ -390,10 +429,20 @@ def main(argv: list[str] | None = None) -> int:
     root = resolve_dataset_root(args.dataset_root)
     log.info("Resolved dataset root: %s", root)
 
+    sticker_arg: float | dict[str, float]
+    if args.sticker_area_by_batch_json:
+        bb_path = Path(args.sticker_area_by_batch_json)
+        loaded = json.loads(bb_path.read_text(encoding="utf-8"))
+        sticker_arg = {str(k): float(v) for k, v in loaded.items()}
+        log.info("Per-batch sticker cm^2: %s (from %s)", sticker_arg, bb_path)
+    else:
+        sticker_arg = args.sticker_area_cm2
+        log.info("Global sticker cm^2: %.2f", sticker_arg)
+
     report = evaluate(
         dataset_root=root,
         split_csv=Path(args.split_csv),
-        sticker_area_cm2=args.sticker_area_cm2,
+        sticker_area_cm2=sticker_arg,
         girth_multiplier=args.girth_multiplier,
         workers=args.workers,
         batches=tuple(args.batches),

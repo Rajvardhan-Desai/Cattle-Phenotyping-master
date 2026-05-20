@@ -42,6 +42,7 @@ import json
 import math
 import statistics
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping
@@ -271,6 +272,23 @@ class StickerSizeEstimate:
     per_sample_cm2: list[float]
 
 
+def _summarize_cm2(cm2: list[float]) -> StickerSizeEstimate:
+    """Build a :class:`StickerSizeEstimate` from a non-empty list of cm² values."""
+    cm2_sorted = sorted(cm2)
+    n = len(cm2_sorted)
+    median = statistics.median(cm2_sorted)
+    q1 = cm2_sorted[n // 4]
+    q3 = cm2_sorted[(3 * n) // 4]
+    diameter_cm = 2.0 * math.sqrt(median / math.pi)
+    return StickerSizeEstimate(
+        n_samples=n,
+        median_area_cm2=median,
+        iqr_area_cm2=(q1, q3),
+        median_diameter_cm=diameter_cm,
+        per_sample_cm2=cm2,
+    )
+
+
 def aggregate_sticker_size(
     scales_with_areas: Iterable[tuple[ScaleResult, int]],
 ) -> StickerSizeEstimate | None:
@@ -287,20 +305,28 @@ def aggregate_sticker_size(
 
     if not cm2:
         return None
+    return _summarize_cm2(cm2)
 
-    cm2_sorted = sorted(cm2)
-    n = len(cm2_sorted)
-    median = statistics.median(cm2_sorted)
-    q1 = cm2_sorted[n // 4]
-    q3 = cm2_sorted[(3 * n) // 4]
-    diameter_cm = 2.0 * math.sqrt(median / math.pi)
-    return StickerSizeEstimate(
-        n_samples=n,
-        median_area_cm2=median,
-        iqr_area_cm2=(q1, q3),
-        median_diameter_cm=diameter_cm,
-        per_sample_cm2=cm2,
-    )
+
+def aggregate_sticker_size_by_batch(
+    scales_with_areas: Iterable[tuple[ScaleResult, int]],
+) -> dict[str, StickerSizeEstimate]:
+    """Per-batch sticker physical-area estimates.
+
+    Identical to :func:`aggregate_sticker_size` but groups by
+    ``result.sample.batch`` first. Use this when the wide-IQR sticker
+    distribution suggests two batches with two different physical stickers
+    (the case for the Kaggle BMGF dataset — see the 2026-05-20 baseline run
+    where B3 implies ~15 cm² and B4 implies ~79 cm²).
+    """
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for result, area_px in scales_with_areas:
+        if result.px_per_cm is None or area_px <= 0:
+            continue
+        buckets[result.sample.batch].append(
+            area_px / (result.px_per_cm * result.px_per_cm)
+        )
+    return {batch: _summarize_cm2(cm2) for batch, cm2 in buckets.items() if cm2}
 
 
 # ---------------------------------------------------- CLI entry (Kaggle-runnable)
@@ -376,6 +402,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-root", required=True, help="Path to the Kaggle dataset root")
     parser.add_argument("--output", default="data/splits/scale_calibration.json")
     parser.add_argument(
+        "--split-csv", default=None,
+        help="Optional split CSV (typically data/splits/train.csv) — when set, only "
+             "samples whose image_filename appears in the CSV are used for calibration. "
+             "Use this to derive the sticker constant on TRAIN ONLY (no test leakage).",
+    )
+    parser.add_argument(
+        "--by-batch-output", default=None,
+        help="Optional JSON path that receives ONLY the per-batch sticker cm^2 mapping "
+             "(e.g. {\"B3\": 15.3, \"B4\": 79.0}). Convenient input to "
+             "baseline_schaeffer --sticker-area-by-batch-json.",
+    )
+    parser.add_argument(
         "--batches", nargs="+", default=["B3", "B4"],
         help="Batches to use (default: B3 B4, the batches with weight labels).",
     )
@@ -406,6 +444,16 @@ def main(argv: list[str] | None = None) -> int:
 
     samples = list(iter_samples(root, batches=tuple(args.batches), views=tuple(args.views)))
     log.info("Loaded %d samples", len(samples))
+
+    if args.split_csv:
+        from cattle_phenotyping.eval.baseline_schaeffer import load_split_filenames
+        split_path = Path(args.split_csv)
+        wanted = load_split_filenames(split_path)
+        before = len(samples)
+        samples = [s for s in samples if s.image_path.name in wanted]
+        log.info(
+            "Filtered to split %s: %d -> %d samples", split_path.name, before, len(samples),
+        )
 
     results: list[ScaleResult] = list(iter_sample_scales(
         samples,
@@ -442,6 +490,15 @@ def main(argv: list[str] | None = None) -> int:
                 sticker_estimate.median_diameter_cm,
             )
 
+        sticker_by_batch = aggregate_sticker_size_by_batch(scales_with_areas)
+        for batch_name, est in sorted(sticker_by_batch.items()):
+            log.info(
+                "  [%s] median=%.2f cm^2 IQR=(%.2f, %.2f) n=%d (~ %.2f cm dia.)",
+                batch_name, est.median_area_cm2,
+                est.iqr_area_cm2[0], est.iqr_area_cm2[1],
+                est.n_samples, est.median_diameter_cm,
+            )
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -457,8 +514,30 @@ def main(argv: list[str] | None = None) -> int:
             "iqr_area_cm2": list(sticker_estimate.iqr_area_cm2),
             "median_diameter_cm_assuming_circle": sticker_estimate.median_diameter_cm,
         }
+    if args.load_masks and sticker_estimate is not None:
+        payload["sticker_by_batch"] = {
+            batch_name: {
+                "n_samples": est.n_samples,
+                "median_area_cm2": est.median_area_cm2,
+                "iqr_area_cm2": list(est.iqr_area_cm2),
+                "median_diameter_cm_assuming_circle": est.median_diameter_cm,
+            }
+            for batch_name, est in sorted(sticker_by_batch.items())
+        }
+    if args.split_csv:
+        payload["split_csv"] = args.split_csv
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     log.info("Wrote calibration report -> %s", output_path)
+
+    if args.by_batch_output and args.load_masks and sticker_estimate is not None:
+        bb_path = Path(args.by_batch_output)
+        bb_path.parent.mkdir(parents=True, exist_ok=True)
+        bb_mapping = {
+            batch_name: est.median_area_cm2
+            for batch_name, est in sorted(sticker_by_batch.items())
+        }
+        bb_path.write_text(json.dumps(bb_mapping, indent=2, sort_keys=True), encoding="utf-8")
+        log.info("Wrote per-batch sticker cm^2 mapping -> %s", bb_path)
     return 0
 
 
