@@ -15,6 +15,7 @@ copy-paste-ready into a Kaggle code cell.
 | Image size | 640 px | Default; sticker ≈ 50-100 px at 640, readable |
 | Horizontal flip | **Disabled** | Side-view photos break L/R if flipped |
 | Bbox source | Keypoint hull + 15% margin | No mask I/O, deterministic, standard |
+| OKS sigmas | `apply_cattle_pose_sigmas()` (0.025-0.05 per kpt) | **Critical** — default σ=1/N=0.111 lets the metric report 0.95 while the model places `_top` keypoints at the bbox edge. See [[progress-2026-05-21]] post-mortem. |
 | Eval | Forward-Schaeffer MAE/MAPE + per-keypoint pixel error | Direct comparison to baseline |
 | Filter | `load_filter_set("data/calibration/suspect_samples.csv")` (~110-115 drops) | `large_residual` + `implausible_low_weight` only |
 
@@ -27,7 +28,7 @@ copy-paste-ready into a Kaggle code cell.
 !pip -q install "ultralytics>=8.1.0"
 
 # Cell 2: clone the repo into /kaggle/working
-!cd /kaggle/working && [ -d Cattle-Phenotyping-master ] || git clone https://github.com/<user>/Cattle-Phenotyping-master.git
+!cd /kaggle/working && [ -d Cattle-Phenotyping-master ] || git clone https://github.com/Rajvardhan-Desai/Cattle-Phenotyping-master.git
 
 # Cell 3: install the package (editable, so notebook can call into it)
 %cd /kaggle/working/Cattle-Phenotyping-master
@@ -96,6 +97,16 @@ print(sample_label.name, "->", sample_label.read_text().strip())
 ```python
 # Cell 10: launch training
 from ultralytics import YOLO
+from cattle_phenotyping.training.kpt_sigmas import apply_cattle_pose_sigmas
+
+# CRITICAL: install cattle-specific OKS sigmas BEFORE model.train() runs.
+# Without this, Ultralytics 8.4.x falls back to sigma = 1/N = 0.111 for every
+# keypoint, which is so loose that the pose loss gradient can't push the head
+# off the "predict every _top keypoint at the bbox top edge" local minimum.
+# The 2026-05-21 run hit mAP50-95(P) = 0.953 with that bug and produced
+# forward-Schaeffer val MAE = 166 kg. Patch first, train after.
+apply_cattle_pose_sigmas()
+
 model = YOLO("yolov8s-pose.pt")
 results = model.train(
     data=str(YOLO_DS_DIR / "data.yaml"),
@@ -247,9 +258,13 @@ for p in artifacts_to_commit:
 ## Success criteria
 
 - **Pipeline correctness:** export → train → eval runs end-to-end without exceptions.
-- **OKS-50 ≥ 0.85** on val (Ultralytics' native metric — sanity check that the keypoint head trained).
-- **Forward-Schaeffer MAE on val with predicted keypoints ≤ 40 kg.** If the gap to the 30.25 baseline (GT keypoints, test) is <10 kg, we're keypoint-bottlenecked but not catastrophically. If the gap is >20 kg, debug the keypoint head before moving on.
-- Per-keypoint p90 pixel error ≤ 25 px at 640 imgsz for the spine keypoints (wither, pinbone). Girth keypoints are usually noisier (image silhouette, not skeletal landmark).
+- **Forward-Schaeffer MAE on val with predicted keypoints ≤ 40 kg** — this is the *binding* criterion. With tight cattle sigmas applied, Ultralytics' OKS now reflects real anatomy, but the forward-Schaeffer number is still the deliverable metric.
+- **OKS-50 ≥ 0.85** on val *under the cattle sigma override*. With the tighter sigmas, an OKS-50 of 0.85 is now meaningful (≈median pixel error ≲ 0.03 × bbox_side on the skeletal keypoints) — unlike the 2026-05-21 run where 0.99 OKS-50 was achievable with 400 px errors.
+- **Per-keypoint p90 pixel error at 4160×3120:**
+  - Skeletal anchors (`wither`, `pinbone`, `shoulderbone`): ≤ 80 px.
+  - Girth top/bottom keypoints: ≤ 120 px (live on body outline, fuzzier).
+  - Height top/bottom: ≤ 160 px (fuzziest — top of back curve, ground line).
+- **Per-batch forward-Schaeffer:** B3 and B4 should each land within 5 kg of overall MAE. A large per-batch split signals the model learned one batch's framing and not the other's.
 
 ## Open questions to revisit after the first run
 
