@@ -593,7 +593,11 @@ b8.metric("Keypoint mean conf", f"{feat_result['kp_conf_mean']:.2f}")
 
 with st.expander("📄 Full feature vector + raw prediction JSON"):
     st.json({
-        "click_xy": [click_x, click_y],
+        "sticker_input": {
+            "mode": sticker_mode,
+            "click_xy": list(input_marker) if input_marker is not None else None,
+            "area_px": sticker_area_px,
+        },
         "batch": batch_choice,
         "predicted_weight_kg": pred_kg,
         "schaeffer_kg": schaeffer_kg,
