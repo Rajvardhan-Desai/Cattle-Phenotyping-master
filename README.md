@@ -52,12 +52,10 @@ The dataset includes a custom **sticker** applied to each cow's body as a scale 
 cattle_phenotyping/
 ├── data/
 │   ├── kaggle.py              # COCO parser + KaggleSample iterator (B3/B4 side-view)
-│   └── mask_io.py             # Sticker / cow mask pixel-area loader (parallel)
+│   └── mask_io.py             # Sticker mask pixel-area loader (parallel)
 ├── pipeline/
 │   ├── scale_calibration.py   # Back-derive sticker cm² per batch (CLI)
-│   ├── keypoint_scale_features.py
-│   ├── feature_extractor.py   # legacy
-│   └── phenotyping_pipeline.py # legacy cascade
+│   └── weight_head_features.py # 17-feature builder for the learned head
 ├── eval/
 │   ├── baseline_schaeffer.py  # Forward-Schaeffer eval on a split (CLI)
 │   ├── flag_suspects.py       # Suspect-sample flagger (CLI)
@@ -65,21 +63,21 @@ cattle_phenotyping/
 ├── training/
 │   ├── build_splits.py        # Animal-grouped, weight-stratified splits (CLI)
 │   ├── export_yolo_pose.py    # Export Kaggle → Ultralytics YOLOv8-pose format (CLI)
-│   ├── audit_dataset.py
-│   └── train_trait_model.py   # legacy
+│   ├── kpt_sigmas.py          # Cattle OKS sigmas + Ultralytics patcher
+│   └── train_weight_head.py   # Train XGBoost weight head + report (CLI)
 ├── models/
 │   ├── schaeffer.py           # Pure-function Schaeffer formula
-│   ├── detector_yolov8.py     # legacy
-│   ├── segmenter_sam.py       # legacy
-│   ├── trait_model_xgboost.py # legacy
-│   └── keypoint_scale_weight_model.py
-├── utils/                     # config, logging, seeding, run-dir, visualization
-├── app/streamlit_app.py       # legacy — slated for rewrite
-└── cli.py                     # `python -m cattle_phenotyping.cli` (legacy pipeline)
+│   ├── segmenter_sam.py       # SAM ViT-B (used for sticker click in the demo app)
+│   └── weight_head.py         # XGBoost wrapper with save/load + feature validation
+├── utils/                     # log, seed, visualization
+└── app/
+    └── demo_app.py            # Streamlit demo: pose → SAM(point) → weight head
 
 notebooks/
 ├── inspect_kaggle.ipynb           # Phase 0 dataset audit (run on Kaggle)
-└── train_keypoints.scope.md       # YOLOv8s-pose training scope (paste-ready into Kaggle)
+├── train_keypoints.scope.md       # YOLOv8s-pose training scope (paste-ready into Kaggle)
+├── train_segmenter.scope.md       # YOLOv8s-seg training scope (next workstream)
+└── train_weight_head.scope.md     # Weight-head training scope
 
 data/                              # gitignored at runtime; produced on Kaggle
 ├── splits/{train,val,test}.csv
@@ -88,17 +86,21 @@ data/                              # gitignored at runtime; produced on Kaggle
 │   ├── scale_calibration_train.json
 │   ├── suspect_samples.csv
 │   └── suspect_samples_summary.json
+├── predictions/                  # yolov8s_pose_{train,val,test}.json
 └── results/
-    └── baseline_schaeffer_test_perbatch.json
+    ├── baseline_schaeffer_test_perbatch.json
+    ├── yolov8s_pose_val_eval.json
+    ├── weight_head.json + weight_head.meta.json
+    └── weight_head_report.json
 
 docs/
 ├── kaggle_dataset_notes.md     # dataset audit (filename grammars, keypoint schemas, etc.)
-└── kaggle_model_integration.md
+└── demo_runbook.md             # step-by-step for running the Streamlit demo
 
-tests/                          # pytest; 159 tests passing on CPU
+tests/                          # pytest; 186 tests passing on CPU
 ```
 
-`main.py` at the repo root is a thin shim around `cattle_phenotyping.cli` (the legacy single-image cascade) — kept for backward compatibility, not the recommended entry point.
+The launcher is `streamlit run cattle_phenotyping/app/demo_app.py` — there is no longer a single-image CLI in the active codebase; reproduce-baseline commands are run as `python -m cattle_phenotyping.training.<module>` (see [Reproducing the baseline](#reproducing-the-baseline) above).
 
 ---
 
@@ -168,8 +170,8 @@ OVERALL  n=≈900  MAE=30.25  RMSE=≈45  MAPE=19.69%  bias=+0.33  R²=0.11
 - **Sticker is a hard dependency.** The pipeline assumes the same fiducial sticker is in frame at inference as at training time. Without it, scale calibration fails and there is no quiet fallback — by design.
 - **Per-batch sticker constants.** Any new batch (e.g. a hypothetical B5) needs its own sticker cm² re-derivation. Do not reuse B3's or B4's constant.
 - **Animal IDs are batch-local.** Use the tuple key `(batch, animal_id)` for any join or split key. Raw `animal_id` collisions across batches are coincidental and must not be treated as the same animal.
-- **No BCS.** The Kaggle dataset has no Body Condition Score labels, so BCS is dropped from the project deliverable. Heuristic BCS predictions in `models/trait_model_xgboost.py` are legacy and should not be shipped.
-- **Legacy SAM cascade.** The original YOLOv8 → SAM → OpenCV → XGBoost cascade in `pipeline/phenotyping_pipeline.py` predates the Kaggle pivot. It is kept in the tree for reference but is not the recommended inference path.
+- **No BCS.** The Kaggle dataset has no Body Condition Score labels, so BCS is dropped from the project deliverable.
+- **SAM only for sticker click at inference.** Until the trained YOLOv8-seg lands, the demo app uses SAM ViT-B with a single user click to segment the sticker. SAM is otherwise out of the training-time path.
 
 ---
 

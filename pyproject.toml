@@ -33,12 +33,9 @@ dev = [
     "pytest-cov>=4.1",
 ]
 
-[project.scripts]
-cattle-phenotype = "cattle_phenotyping.cli:main"
-
 [tool.setuptools.packages.find]
 include = ["cattle_phenotyping*"]
-exclude = ["tests*", "configs*", "data*", "docs*", "runs*", "saved_models*", "weights*"]
+exclude = ["tests*", "data*", "docs*", "runs*", "weights*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
