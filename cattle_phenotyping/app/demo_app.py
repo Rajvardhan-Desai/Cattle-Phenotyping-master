@@ -387,10 +387,14 @@ KP_COLORS = {
     "rear_girth_top": (0, 200, 0), "rear_girth_bottom": (0, 200, 0),
     "height_top": (0, 0, 200), "height_bottom": (0, 0, 200),
 }
+kp_radius = max(8, W // 250)
 for name, (x, y, c) in pose_out["keypoints"].items():
     if c < 0.3:
         continue
-    cv2.circle(overlay, (int(x), int(y)), max(4, W // 600), KP_COLORS.get(name, (255, 200, 0)), -1)
+    center = (int(x), int(y))
+    color = KP_COLORS.get(name, (255, 200, 0))
+    cv2.circle(overlay, center, kp_radius + 2, (0, 0, 0), -1)
+    cv2.circle(overlay, center, kp_radius, color, -1)
 
 
 # ── Stage 2: sticker — draw shape OR SAM click ─────────────────────────
