@@ -175,13 +175,16 @@ st.markdown("""
         border-radius: 8px;
         padding: 18px 22px;
         margin: 6px 0;
+        color: #222;
     }
-    .metric-card .label { font-size: 13px; color: #555; text-transform: uppercase; letter-spacing: .05em; }
-    .metric-card .value { font-size: 36px; font-weight: 700; color: #1b5e20; line-height: 1.1; }
-    .metric-card .sub   { font-size: 12px; color: #777; margin-top: 4px; }
+    .metric-card * { color: inherit; }
+    .metric-card .label { font-size: 13px; color: #555 !important; text-transform: uppercase; letter-spacing: .05em; }
+    .metric-card .value { font-size: 36px; font-weight: 700; color: #1b5e20 !important; line-height: 1.1; }
+    .metric-card .sub   { font-size: 12px; color: #666 !important; margin-top: 4px; }
     .stage {
         background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px;
         padding: 8px 12px; margin: 4px 0; font-size: 13px;
+        color: #222;
     }
     .stage.ok { border-left: 4px solid #43a047; }
     .stage.warn { border-left: 4px solid #fb8c00; }
