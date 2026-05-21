@@ -293,7 +293,7 @@ def run_pose(image_rgb_bytes: bytes, conf: float, model_path: str):
 pose_out = run_pose(image_rgb.tobytes(), pose_conf, pose_weights_path)
 if pose_out is None:
     st.markdown('<div class="stage err">Stage 1 — pose: no cow detected. Try a clearer side-view image or lower the confidence threshold.</div>', unsafe_allow_html=True)
-    st.image(image_rgb, caption=uploaded.name, use_container_width=True)
+    st.image(image_rgb, caption=uploaded.name, width="stretch")
     st.stop()
 st.markdown(
     f'<div class="stage ok">Stage 1 — pose: cow detected at conf {pose_out["bbox_conf"]:.2f}, '
@@ -436,7 +436,7 @@ elif sticker_mode.startswith("SAM"):
             click_y = int(click["y"] / scale)
         else:
             st.warning("Install `streamlit-image-coordinates` for click-to-segment, or use Draw mode.")
-            st.image(overlay, use_container_width=True)
+            st.image(overlay, width="stretch")
             cc1, cc2 = st.columns(2)
             click_x = cc1.number_input("Sticker x (px)", 0, W - 1, W // 2)
             click_y = cc2.number_input("Sticker y (px)", 0, H - 1, H // 2)
@@ -477,7 +477,7 @@ mask_vis = (mask_vis * (1 - alpha) + red * alpha).astype(np.uint8)
 if input_marker is not None:
     cv2.drawMarker(mask_vis, input_marker, (255, 255, 0), cv2.MARKER_CROSS, 30, 3)
 with right_col:
-    st.image(mask_vis, caption="Sticker mask overlay", use_container_width=True)
+    st.image(mask_vis, caption="Sticker mask overlay", width="stretch")
 
 
 # ── Stage 3: features + weight head ──────────────────────────────────────
