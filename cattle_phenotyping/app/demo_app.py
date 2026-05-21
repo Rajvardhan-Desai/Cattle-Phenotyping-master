@@ -58,6 +58,48 @@ from cattle_phenotyping.utils.log import setup_logging
 setup_logging(level="INFO")
 
 
+# --- streamlit-drawable-canvas compatibility shim ---------------------------
+#
+# streamlit-drawable-canvas 0.9.3 imports ``streamlit.elements.image.image_to_url``,
+# which Streamlit removed (it was a private internal). Older shim signature:
+#
+#     image_to_url(image, width, clamp, channels, output_format, image_id)
+#         -> str  (URL or data URI)
+#
+# Reinstate it as a base64 data-URI emitter so the canvas works on current
+# Streamlit. Done before the ``from streamlit_drawable_canvas import st_canvas``
+# call below.
+try:
+    from streamlit.elements import image as _st_image_module  # type: ignore[import-not-found]
+    if not hasattr(_st_image_module, "image_to_url"):
+        import base64 as _b64
+        import io as _io
+
+        def _image_to_url(
+            image, width=None, clamp=False, channels="RGB",
+            output_format="PNG", image_id=None, **_kwargs,
+        ):
+            """Drop-in replacement for the removed Streamlit private function."""
+            from PIL import Image as _PIL
+            import numpy as _np
+            if isinstance(image, _np.ndarray):
+                pil = _PIL.fromarray(image)
+            elif hasattr(image, "save"):
+                pil = image
+            else:
+                raise TypeError(f"Unsupported image type for canvas background: {type(image)}")
+            fmt = (output_format or "PNG").upper()
+            if fmt == "JPEG" and pil.mode != "RGB":
+                pil = pil.convert("RGB")
+            buf = _io.BytesIO()
+            pil.save(buf, format=fmt)
+            mime = "image/jpeg" if fmt == "JPEG" else "image/png"
+            return f"data:{mime};base64,{_b64.b64encode(buf.getvalue()).decode('ascii')}"
+
+        _st_image_module.image_to_url = _image_to_url  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover — if shimming fails, drawable-canvas import below will raise.
+    pass
+
 # Drawing canvas for sticker selection — primary path.
 try:
     from streamlit_drawable_canvas import st_canvas  # type: ignore[import-not-found]
