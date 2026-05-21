@@ -71,6 +71,26 @@ log = get_logger(__name__)
 # ----------------------------------------------------------- IO helpers
 
 
+def _json_default(obj):
+    """json.dumps fallback for numpy scalars and arrays.
+
+    XGBoost feature_importance + Pandas .iloc[...] return numpy scalars
+    (``np.float32``, ``np.int64``) that ``json.dumps`` doesn't know about
+    natively. Cast them to plain Python types so the report writes cleanly.
+    """
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def load_predictions_json(path: Path) -> dict[str, dict[str, tuple[float, float, float]]]:
     """Load a ``{filename: {kp_name: [x, y, conf]}}`` JSON.
 
@@ -403,7 +423,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     report_path = Path(args.output_report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True, default=_json_default),
+        encoding="utf-8",
+    )
     log.info("Wrote report -> %s", report_path)
     return 0
 
