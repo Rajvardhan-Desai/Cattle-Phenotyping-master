@@ -82,17 +82,24 @@ class CowSegmenter:
 
         Tuned for the **sticker** use case: a small, locally-coherent blob on
         the cow's body. SAM returns multiple candidate masks at different
-        granularities; we pick the smallest mask that contains the prompt
-        point and stays under ``max_area_fraction`` of the image (so SAM
-        can't accidentally return "the whole cow" because the point landed
-        somewhere ambiguous).
+        granularities — for the cattle sticker (a printed disc with internal
+        text/logo) those are typically:
+
+        * smallest = the inner logo / single ink region (sub-part),
+        * medium   = the full sticker disc (the object we want), and
+        * largest  = the disc + surrounding context (often above the area cap).
+
+        We pick the **largest mask still under** ``max_area_fraction`` of the
+        image. The cap rules out "segmented the entire cow"; within that cap,
+        the most-inclusive mask is the one whose boundary matches the full
+        sticker rather than its inner artwork.
 
         Args:
             image: BGR numpy array.
             point_xy: ``(x_px, y_px)`` click coordinates in image space.
             max_area_fraction: Reject candidate masks larger than this
                 fraction of the image area. Default ``0.05`` (5%) — the
-                sticker is typically < 1% but the cap leaves headroom for
+                sticker is typically 0.5-2% but the cap leaves headroom for
                 low-resolution uploads. Set to ``1.0`` to accept any size.
 
         Returns:
@@ -112,8 +119,9 @@ class CowSegmenter:
         )
 
         # Filter to masks that include the prompt point and stay under the
-        # area cap. SAM returns 3 multimask candidates ordered by IoU score;
-        # we re-rank by "smallest valid", since stickers are small.
+        # area cap. SAM returns 3 multimask candidates ordered by its own
+        # internal IoU score; we re-rank by "largest valid" so the full
+        # sticker disc wins over its inner logo region.
         H, W = image_rgb.shape[:2]
         max_pixels = max_area_fraction * H * W
         click_x, click_y = int(point_xy[0]), int(point_xy[1])
@@ -131,13 +139,14 @@ class CowSegmenter:
         if not valid:
             log.warning(
                 "SAM point prompt produced no mask under %.1f%% of image area; "
-                "returning empty mask. Try clicking more precisely on the sticker.",
+                "returning empty mask. Try clicking more precisely on the sticker, "
+                "or raise the sticker cap.",
                 max_area_fraction * 100,
             )
             return np.zeros((H, W), dtype=np.uint8)
 
-        # Smallest valid mask wins — for stickers we want the tight crop.
-        valid.sort(key=lambda t: t[0])
+        # Largest valid mask wins — the full sticker disc beats the inner logo.
+        valid.sort(key=lambda t: -t[0])
         best_mask = valid[0][1]
         mask_u8 = (best_mask.astype(np.uint8)) * 255
         return self._largest_component(mask_u8)

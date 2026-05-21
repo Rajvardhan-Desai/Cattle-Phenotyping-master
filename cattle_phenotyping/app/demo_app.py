@@ -58,7 +58,14 @@ from cattle_phenotyping.utils.log import setup_logging
 setup_logging(level="INFO")
 
 
-# Optional click-on-image input. Falls back to number inputs if missing.
+# Drawing canvas for sticker selection — primary path.
+try:
+    from streamlit_drawable_canvas import st_canvas  # type: ignore[import-not-found]
+    HAS_DRAW_CANVAS = True
+except ImportError:  # pragma: no cover
+    HAS_DRAW_CANVAS = False
+
+# Optional click-on-image input — fallback (SAM-on-click).
 try:
     from streamlit_image_coordinates import streamlit_image_coordinates  # type: ignore[import-not-found]
     HAS_CLICK_INPUT = True
@@ -120,23 +127,36 @@ with st.sidebar:
 
     pose_weights_path = st.text_input("Pose weights (best.pt)", pose_weights_default)
     weight_head_path = st.text_input("Weight head stem (no extension)", weight_head_default)
-    sam_ckpt_path = st.text_input("SAM ViT-B checkpoint", sam_ckpt_default)
     sticker_cm2_path = st.text_input("Per-batch sticker cm² JSON", sticker_cm2_default)
+
+    st.divider()
+    st.header("Sticker input")
+    sticker_mode = st.radio(
+        "How to mark the sticker",
+        options=("Draw shape (recommended)", "SAM click (fallback)"),
+        index=0,
+        help="Draw mode is deterministic and doesn't need SAM. Click mode uses SAM ViT-B with a point prompt.",
+    )
+    if sticker_mode == "SAM click (fallback)":
+        sam_ckpt_path = st.text_input("SAM ViT-B checkpoint", sam_ckpt_default)
+        sticker_max_area_pct = st.slider(
+            "SAM sticker cap (% of image area)", 0.5, 10.0, 5.0, 0.5,
+            help="Reject SAM masks larger than this — prevents 'segmented the whole cow' on bad clicks.",
+        )
+    else:
+        sam_ckpt_path = sam_ckpt_default      # not loaded in draw mode
+        sticker_max_area_pct = 5.0
 
     st.divider()
     st.header("Inference")
     batch_choice = st.selectbox(
         "Batch (sticker calibration)",
         options=("B3", "B4"),
-        index=1,  # default B4 — larger sticker, easier to click and segment
+        index=1,  # default B4 — larger sticker, easier to draw around
         help="Determines which sticker cm² and one-hot the weight head uses. "
              "B3 ≈ 15 cm² (smaller sticker), B4 ≈ 79 cm² (larger sticker).",
     )
     pose_conf = st.slider("Pose confidence threshold", 0.0, 0.9, 0.25, 0.05)
-    sticker_max_area_pct = st.slider(
-        "SAM sticker cap (% of image area)", 0.5, 10.0, 5.0, 0.5,
-        help="Reject SAM masks larger than this — prevents 'segmented the whole cow' when the click misses.",
-    )
 
 
 # ── Cached model loaders ──────────────────────────────────────────────────
@@ -176,14 +196,17 @@ st.markdown(
 
 load_errors: list[str] = []
 pose = sam_seg = weight_head = sticker_cm2_by_batch = None
+need_sam = sticker_mode.startswith("SAM")
+
 try:
     pose = load_pose(pose_weights_path)
 except Exception as e:
     load_errors.append(f"Pose: {e}")
-try:
-    sam_seg = load_sam(sam_ckpt_path)
-except Exception as e:
-    load_errors.append(f"SAM: {e}")
+if need_sam:
+    try:
+        sam_seg = load_sam(sam_ckpt_path)
+    except Exception as e:
+        load_errors.append(f"SAM: {e}")
 try:
     weight_head = load_weight_head(weight_head_path)
 except Exception as e:
@@ -198,11 +221,16 @@ if load_errors:
              "\n".join(f"- {e}" for e in load_errors))
     st.stop()
 
-assert pose is not None and sam_seg is not None and weight_head is not None and sticker_cm2_by_batch is not None
+assert pose is not None and weight_head is not None and sticker_cm2_by_batch is not None
+if need_sam:
+    assert sam_seg is not None
 
 with st.sidebar:
     st.divider()
-    st.markdown("**Loaded:** ✓ pose ✓ SAM ✓ weight head")
+    loaded_parts = ["✓ pose", "✓ weight head"]
+    if need_sam:
+        loaded_parts.insert(1, "✓ SAM")
+    st.markdown(f"**Loaded:** {' '.join(loaded_parts)}")
     st.caption(f"Pose classes: {pose.names}")
     st.caption(f"Pose kpts: {pose.model.model[-1].kpt_shape}")
     st.caption(f"WeightHead best_iter: {weight_head.best_iteration}")
@@ -290,69 +318,166 @@ for name, (x, y, c) in pose_out["keypoints"].items():
     cv2.circle(overlay, (int(x), int(y)), max(4, W // 600), KP_COLORS.get(name, (255, 200, 0)), -1)
 
 
-# ── Stage 2: sticker click + SAM ─────────────────────────────────────────
+# ── Stage 2: sticker — draw shape OR SAM click ─────────────────────────
 
 
 st.divider()
-st.subheader("👆 Click the sticker")
 
-left_col, right_col = st.columns([1, 1], gap="medium")
+# Display-resolution scaling: keep the canvas big enough to be clickable, but
+# never bigger than the displayed image area. We render in display space and
+# scale shape coordinates back to original-image space for the mask.
+display_max_dim = 900
+scale = min(1.0, display_max_dim / max(H, W))
+disp_w, disp_h = int(W * scale), int(H * scale)
 
-with left_col:
-    if HAS_CLICK_INPUT:
-        # Show overlay with keypoints; user clicks on the sticker.
-        # The component scales the displayed image; coords come back in
-        # display-pixel space, so we rescale below.
-        display_max_dim = 900
-        scale = min(1.0, display_max_dim / max(H, W))
-        disp_w, disp_h = int(W * scale), int(H * scale)
-        pil = Image.fromarray(overlay).resize((disp_w, disp_h))
-        click = streamlit_image_coordinates(pil, key="sticker_click")
-        st.caption("Tip: click the centre of the sticker. Red=spine • Green=girth • Blue=height keypoints.")
-        if click is None:
-            st.info("Waiting for click...")
-            st.stop()
-        click_x = int(click["x"] / scale)
-        click_y = int(click["y"] / scale)
-    else:
-        st.warning(
-            "`streamlit-image-coordinates` isn't installed — using manual coordinate input. "
-            "Install with `pip install streamlit-image-coordinates` for click-to-segment."
+
+def _build_mask_from_canvas_objects(objs: list[dict]) -> np.ndarray:
+    """Rasterize fabric.js canvas objects into a binary mask at full image resolution.
+
+    Supported shapes: ``rect``, ``circle``, ``ellipse``, ``path`` (freedraw),
+    ``polygon``. Returns ``uint8`` mask sized ``(H, W)`` with 255 inside the
+    drawn region. Multiple objects are unioned together.
+    """
+    mask = np.zeros((H, W), dtype=np.uint8)
+    for obj in objs:
+        otype = obj.get("type")
+        # The canvas-display → original-image scale factor.
+        sx = 1.0 / scale
+        sy = 1.0 / scale
+
+        if otype == "rect":
+            # fabric.js rect: left, top are top-left in display-pixel space.
+            x1 = int(obj["left"] * sx)
+            y1 = int(obj["top"] * sy)
+            x2 = int((obj["left"] + obj["width"] * obj.get("scaleX", 1)) * sx)
+            y2 = int((obj["top"] + obj["height"] * obj.get("scaleY", 1)) * sy)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
+        elif otype == "circle":
+            # fabric.js circle: bbox top-left is (left, top); radius in display px.
+            r_disp = float(obj["radius"]) * float(obj.get("scaleX", 1))
+            cx = int((obj["left"] + r_disp) * sx)
+            cy = int((obj["top"] + r_disp) * sy)
+            rx = int(r_disp * sx)
+            ry = int(float(obj["radius"]) * float(obj.get("scaleY", 1)) * sy)
+            cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, thickness=-1)
+        elif otype == "ellipse":
+            rx_disp = float(obj["rx"]) * float(obj.get("scaleX", 1))
+            ry_disp = float(obj["ry"]) * float(obj.get("scaleY", 1))
+            cx = int((obj["left"] + rx_disp) * sx)
+            cy = int((obj["top"] + ry_disp) * sy)
+            cv2.ellipse(mask, (cx, cy), (int(rx_disp * sx), int(ry_disp * sy)),
+                        0, 0, 360, 255, thickness=-1)
+        elif otype == "path":
+            # Freedraw stroke. Each path segment is ["M", x, y] or ["Q"/"L", ...].
+            pts = []
+            for cmd in obj.get("path", []):
+                # Last two entries are the (x, y) destination for all cmds.
+                if len(cmd) >= 3:
+                    pts.append((int(cmd[-2] * sx), int(cmd[-1] * sy)))
+            if len(pts) >= 3:
+                cv2.fillPoly(mask, [np.array(pts, dtype=np.int32)], 255)
+        elif otype == "polygon":
+            pts = [(int(p["x"] * sx), int(p["y"] * sy)) for p in obj.get("points", [])]
+            if len(pts) >= 3:
+                cv2.fillPoly(mask, [np.array(pts, dtype=np.int32)], 255)
+    return mask
+
+
+sticker_mask: np.ndarray
+input_marker: tuple[int, int] | None = None  # for visualization in the mask panel
+
+if sticker_mode.startswith("Draw") and HAS_DRAW_CANVAS:
+    st.subheader("✏️ Draw around the sticker")
+    st.caption(
+        "Pick **circle** or **freedraw** below, then drag on the image to outline the sticker. "
+        "Tighter outline = more accurate weight. Use the trash icon to redo."
+    )
+    draw_tool = st.radio(
+        "Drawing tool", options=("circle", "freedraw", "rect"),
+        index=0, horizontal=True,
+        help="Circle: drag from one edge of the sticker to the opposite. Freedraw: trace the boundary. Rect: drag a bounding box.",
+    )
+    left_col, right_col = st.columns([1, 1], gap="medium")
+    with left_col:
+        pil_bg = Image.fromarray(overlay).resize((disp_w, disp_h))
+        canvas_result = st_canvas(
+            fill_color="rgba(255, 0, 0, 0.35)",
+            stroke_width=3,
+            stroke_color="#ff2222",
+            background_image=pil_bg,
+            update_streamlit=True,
+            height=disp_h,
+            width=disp_w,
+            drawing_mode=draw_tool,
+            key=f"sticker_canvas_{uploaded.name}",  # reset on new upload
         )
-        st.image(overlay, caption="Keypoints + bbox overlay (use this to read sticker coords)", use_container_width=True)
-        cc1, cc2 = st.columns(2)
-        click_x = cc1.number_input("Sticker x (px)", 0, W - 1, W // 2)
-        click_y = cc2.number_input("Sticker y (px)", 0, H - 1, H // 2)
-        if not st.button("Segment sticker at this point"):
-            st.stop()
+    if canvas_result.json_data is None or not canvas_result.json_data.get("objects"):
+        with right_col:
+            st.info("Draw a shape over the sticker on the left to continue.")
+        st.stop()
 
-with right_col:
+    sticker_mask = _build_mask_from_canvas_objects(canvas_result.json_data["objects"])
+    sticker_area_px = int((sticker_mask > 0).sum())
+
+elif sticker_mode.startswith("SAM"):
+    assert sam_seg is not None
+    st.subheader("👆 Click the sticker (SAM mode)")
+    left_col, right_col = st.columns([1, 1], gap="medium")
+    with left_col:
+        if HAS_CLICK_INPUT:
+            pil_bg = Image.fromarray(overlay).resize((disp_w, disp_h))
+            click = streamlit_image_coordinates(pil_bg, key="sticker_click")
+            st.caption("Click the centre of the sticker.")
+            if click is None:
+                with right_col:
+                    st.info("Waiting for click...")
+                st.stop()
+            click_x = int(click["x"] / scale)
+            click_y = int(click["y"] / scale)
+        else:
+            st.warning("Install `streamlit-image-coordinates` for click-to-segment, or use Draw mode.")
+            st.image(overlay, use_container_width=True)
+            cc1, cc2 = st.columns(2)
+            click_x = cc1.number_input("Sticker x (px)", 0, W - 1, W // 2)
+            click_y = cc2.number_input("Sticker y (px)", 0, H - 1, H // 2)
+            if not st.button("Segment sticker at this point"):
+                st.stop()
+
     with st.spinner("SAM segmenting sticker..."):
         sticker_mask = sam_seg.segment_from_point(
             image_bgr, (click_x, click_y),
             max_area_fraction=sticker_max_area_pct / 100.0,
         )
     sticker_area_px = int((sticker_mask > 0).sum())
-    if sticker_area_px == 0:
-        st.markdown(
-            '<div class="stage err">Stage 2 — SAM: no mask under the size cap. '
-            'Click more precisely on the sticker, or raise the SAM cap in the sidebar.</div>',
-            unsafe_allow_html=True,
-        )
-        st.image(image_rgb, caption=f"Click was at ({click_x}, {click_y})", use_container_width=True)
-        st.stop()
-    st.markdown(
-        f'<div class="stage ok">Stage 2 — SAM: sticker segmented, area = {sticker_area_px:,} px '
-        f'({100*sticker_area_px/(H*W):.2f}% of image)</div>', unsafe_allow_html=True,
+    input_marker = (click_x, click_y)
+else:
+    st.error(
+        "Draw mode requires `streamlit-drawable-canvas` (not installed). "
+        "Install via `pip install streamlit-drawable-canvas` or switch to SAM mode in the sidebar."
     )
+    st.stop()
 
-    # Render the sticker mask as a red translucent overlay.
-    mask_vis = overlay.copy()
-    red = np.zeros_like(mask_vis); red[..., 0] = 255
-    alpha = (sticker_mask > 0).astype(np.float32)[..., None] * 0.6
-    mask_vis = (mask_vis * (1 - alpha) + red * alpha).astype(np.uint8)
-    cv2.drawMarker(mask_vis, (click_x, click_y), (255, 255, 0), cv2.MARKER_CROSS, 30, 3)
-    st.image(mask_vis, caption=f"Sticker mask overlay + click marker", use_container_width=True)
+if sticker_area_px == 0:
+    st.markdown(
+        '<div class="stage err">Stage 2 — sticker mask is empty. Redraw or click more precisely.</div>',
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+st.markdown(
+    f'<div class="stage ok">Stage 2 — sticker selected, area = {sticker_area_px:,} px '
+    f'({100*sticker_area_px/(H*W):.2f}% of image)</div>', unsafe_allow_html=True,
+)
+
+# Render the sticker mask as a red translucent overlay (right panel).
+mask_vis = overlay.copy()
+red = np.zeros_like(mask_vis); red[..., 0] = 255
+alpha = (sticker_mask > 0).astype(np.float32)[..., None] * 0.6
+mask_vis = (mask_vis * (1 - alpha) + red * alpha).astype(np.uint8)
+if input_marker is not None:
+    cv2.drawMarker(mask_vis, input_marker, (255, 255, 0), cv2.MARKER_CROSS, 30, 3)
+with right_col:
+    st.image(mask_vis, caption="Sticker mask overlay", use_container_width=True)
 
 
 # ── Stage 3: features + weight head ──────────────────────────────────────

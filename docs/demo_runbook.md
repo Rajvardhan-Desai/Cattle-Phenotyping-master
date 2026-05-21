@@ -46,7 +46,6 @@ In the repo root:
 ```bash
 # Install the package + demo extras
 pip install -e .
-pip install streamlit-image-coordinates   # for click-to-segment UX (optional but recommended)
 
 # Layout the artifacts
 mkdir -p weights/pose data/calibration
@@ -55,9 +54,12 @@ cp /tmp/bundle/pose/best.pt          weights/pose/best.pt
 cp /tmp/bundle/weight_head.json      weights/weight_head.json
 cp /tmp/bundle/weight_head.meta.json weights/weight_head.meta.json
 cp /tmp/bundle/sticker_area_cm2_by_batch.json data/calibration/sticker_area_cm2_by_batch.json
+```
 
-# Download SAM ViT-B (375 MB) if you don't already have it
-# Place in the repo root as sam_vit_b_01ec64.pth
+**SAM is now optional.** The app's default "Draw shape" mode lets you trace the sticker directly with a circle or freedraw tool — no SAM needed, no 375 MB download. If you'd rather use SAM click-mode (e.g. for the "automated segmentation" talking point):
+
+```bash
+# Optional — only if you want the SAM click fallback
 curl -L -o sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 ```
 
@@ -73,7 +75,13 @@ The browser tab opens at `http://localhost:8501`. Sidebar shows green ticks for 
 
 1. **Upload** a side-view cattle photo. (Tip: have 2-3 photos pre-loaded on your desktop — one from each batch B3 and B4 for variety.)
 2. **Wait ~2 seconds** for Stage 1 (pose). Image appears with the bbox + 9 keypoint dots colored by group: red=spine, green=girth, blue=height.
-3. **Click the sticker** in the click image (left). The yellow cross marks your click; SAM segments the sticker in ~3 seconds and renders the mask in red on the right.
+3. **Mark the sticker.** Default mode is **Draw shape**:
+   - Pick **circle** (recommended for the round sticker) — drag from one edge of the sticker to the opposite edge.
+   - Or pick **freedraw** for an irregular shape, or **rect** for a quick bounding box.
+   - Trash icon resets if you mis-draw.
+   - The shape rasterizes immediately; the red mask appears on the right.
+
+   **SAM click mode** (sidebar switch) is available as a fallback if you want to talk about automated segmentation — click once on the sticker centre, SAM segments it.
 4. **Read the result** — three big cards across the bottom:
    - Predicted weight (kg) — what the learned head outputs.
    - Schaeffer baseline — the formula's prediction from the same keypoints.
@@ -123,7 +131,8 @@ In the sidebar, "Batch" defaults to B4 (larger sticker, ~79 cm²). If your demo 
 | Symptom | Fix |
 |---|---|
 | Sidebar reports "Pose: file not found" | Sidebar path doesn't match where you put best.pt. Edit it in the running app (changes take effect on next upload). |
-| "SAM ViT-B not found" | Place `sam_vit_b_01ec64.pth` in the repo root (default sidebar path). Or edit the sidebar path. |
+| "SAM ViT-B not found" | Only relevant in SAM click mode. Either place `sam_vit_b_01ec64.pth` in the repo root, or switch sidebar to "Draw shape (recommended)" mode — no SAM needed. |
+| Drawing canvas doesn't appear | `streamlit-drawable-canvas` isn't installed. `pip install streamlit-drawable-canvas` and restart streamlit. |
 | "WeightHead model file missing" | Sidebar path's stem should NOT include `.json`. Default `weights/weight_head` looks for `weights/weight_head.json` + `.meta.json`. |
 | Predicted weight is wildly off | Wrong batch selected in sidebar (B3 vs B4 sticker calibration). Switch and re-click sticker. |
 | "Stage 2 — SAM: no mask under the size cap" | Your click missed the sticker. Click again more precisely. Or raise "SAM sticker cap" slider in the sidebar (default 5% of image area). |

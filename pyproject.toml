@@ -22,6 +22,7 @@ dependencies = [
     "pandas>=2.0.0",
     "streamlit>=1.28.0",
     "streamlit-image-coordinates>=0.1.6",
+    "streamlit-drawable-canvas>=0.9.3",
     "Pillow>=10.0.0",
     "matplotlib>=3.7.0",
     "PyYAML>=6.0",
