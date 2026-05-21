@@ -61,40 +61,72 @@ setup_logging(level="INFO")
 # --- streamlit-drawable-canvas compatibility shim ---------------------------
 #
 # streamlit-drawable-canvas 0.9.3 imports ``streamlit.elements.image.image_to_url``,
-# which Streamlit removed (it was a private internal). Older shim signature:
+# which Streamlit removed when the private API was renamed. The original shim
+# returned a Streamlit-served URL via the runtime's MediaFileManager (not a
+# data URI) — fabric.js can fail to render multi-megabyte inline data URIs
+# from large background images, which manifests as a black canvas.
 #
-#     image_to_url(image, width, clamp, channels, output_format, image_id)
-#         -> str  (URL or data URI)
-#
-# Reinstate it as a base64 data-URI emitter so the canvas works on current
-# Streamlit. Done before the ``from streamlit_drawable_canvas import st_canvas``
-# call below.
+# We therefore reinstate it to use MediaFileManager when available (the
+# canonical path that produces a proper ``/media/...`` URL) and fall back to a
+# base64 data URI only when the runtime isn't ready yet.
 try:
     from streamlit.elements import image as _st_image_module  # type: ignore[import-not-found]
     if not hasattr(_st_image_module, "image_to_url"):
         import base64 as _b64
+        import hashlib as _hashlib
         import io as _io
+        import mimetypes as _mt
 
         def _image_to_url(
             image, width=None, clamp=False, channels="RGB",
             output_format="PNG", image_id=None, **_kwargs,
         ):
-            """Drop-in replacement for the removed Streamlit private function."""
+            """Drop-in replacement for the removed Streamlit private function.
+
+            Mimics the pre-removal behaviour: encode the image, register it
+            with the MediaFileManager (so Streamlit serves it from /media/...),
+            return the served URL. If the runtime isn't initialised, fall back
+            to an inline data URI.
+            """
             from PIL import Image as _PIL
             import numpy as _np
+
             if isinstance(image, _np.ndarray):
                 pil = _PIL.fromarray(image)
             elif hasattr(image, "save"):
                 pil = image
             else:
                 raise TypeError(f"Unsupported image type for canvas background: {type(image)}")
+
             fmt = (output_format or "PNG").upper()
             if fmt == "JPEG" and pil.mode != "RGB":
                 pil = pil.convert("RGB")
             buf = _io.BytesIO()
             pil.save(buf, format=fmt)
+            data = buf.getvalue()
             mime = "image/jpeg" if fmt == "JPEG" else "image/png"
-            return f"data:{mime};base64,{_b64.b64encode(buf.getvalue()).decode('ascii')}"
+
+            # Preferred path: register with MediaFileManager.
+            try:
+                from streamlit.runtime import get_instance as _get_runtime  # type: ignore[import-not-found]
+                runtime = _get_runtime()
+                mfm = runtime.media_file_mgr
+                file_hash = image_id or _hashlib.md5(data).hexdigest()
+                # MediaFileManager.add signature varies across Streamlit versions
+                # but always takes (path_or_data, mimetype, coordinates) — try the
+                # signatures we know about and surface the URL each returns.
+                try:
+                    url = mfm.add(data, mime, file_hash)
+                except TypeError:
+                    # Older signature: (data, mimetype, coordinates, is_for_static_download)
+                    url = mfm.add(data, mime, file_hash, False)  # type: ignore[call-arg]
+                if isinstance(url, str) and url:
+                    return url
+            except Exception:
+                pass  # fall through to data URI
+
+            # Fallback: data URI. Works for small images; large ones may flake.
+            return f"data:{mime};base64,{_b64.b64encode(data).decode('ascii')}"
 
         _st_image_module.image_to_url = _image_to_url  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover — if shimming fails, drawable-canvas import below will raise.
