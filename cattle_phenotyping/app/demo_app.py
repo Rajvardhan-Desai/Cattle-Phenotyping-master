@@ -45,6 +45,7 @@ import streamlit as st
 from PIL import Image
 
 from cattle_phenotyping.data.kaggle import CANONICAL_SIDE_KEYPOINTS
+from cattle_phenotyping.models.bcs_heuristic import estimate_bcs_from_ratios
 from cattle_phenotyping.models.schaeffer import schaeffer_from_keypoints
 from cattle_phenotyping.models.segmenter_sam import CowSegmenter
 from cattle_phenotyping.models.weight_head import WeightHead
@@ -611,6 +612,38 @@ with m3:
     </div>""", unsafe_allow_html=True)
 
 st.divider()
+st.subheader("🩺 Body Condition Score — heuristic (no BCS labels in dataset)")
+st.caption(
+    "Rule-based 1–5 BCS estimate from the girth-to-length ratio. **Not a learned model** — "
+    "the Kaggle BMGF dataset has no BCS labels, so this is a literature-anchored rule of thumb "
+    "for display only, not a clinical assessment."
+)
+
+bcs = estimate_bcs_from_ratios(feat_result["girth_to_length_ratio_cm"])
+# 1–5 dot indicator (filled vs hollow), mirrors how vets sketch BCS on paper.
+filled = int(round(bcs.score))
+dots_html = " ".join(
+    f"<span style='font-size:22px; color:{'#1b5e20' if i <= filled else '#bbb'}'>●</span>"
+    for i in range(1, 6)
+)
+# Color the score by category (red=very thin/overweight, green=ideal).
+score_color = {
+    "Very thin": "#e53935", "Thin": "#fb8c00",
+    "Ideal": "#1b5e20",
+    "Slightly heavy": "#fb8c00", "Overweight": "#e53935",
+}[bcs.label]
+
+st.markdown(f"""
+<div class="metric-card" style="border-left-color:{score_color};">
+    <div class="label">Body Condition Score (heuristic)</div>
+    <div class="value" style="color:{score_color};">{bcs.score:.1f} <span style="font-size:18px;color:#888;">/ 5.0</span></div>
+    <div style="margin:6px 0;">{dots_html}</div>
+    <div class="sub" style="color:{score_color}; font-weight:600;">{bcs.label}</div>
+    <div class="sub">girth/length = {feat_result['girth_to_length_ratio_cm']:.3f}  ·  anchor (BCS 3) = 0.480  ·  raw = {bcs.raw_score:.2f}</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.divider()
 st.subheader("📐 Derived body measurements (cm)")
 b1, b2, b3, b4 = st.columns(4)
 b1.metric("Body length", f"{feat_result['body_length_cm']:.1f} cm")
@@ -633,6 +666,12 @@ with st.expander("📄 Full feature vector + raw prediction JSON"):
         "batch": batch_choice,
         "predicted_weight_kg": pred_kg,
         "schaeffer_kg": schaeffer_kg,
+        "bcs_heuristic": {
+            "score": bcs.score,
+            "label": bcs.label,
+            "raw_score": bcs.raw_score,
+            "note": "rule-based, not learned; no BCS labels in dataset",
+        },
         "features": feat_result,
         "pose": {
             "bbox": pose_out["bbox"],
