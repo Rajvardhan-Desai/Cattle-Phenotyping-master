@@ -184,6 +184,49 @@ Parser still stores it as `FilenameMeta.extra` (opaque) until we verify with a s
 - ✓ **Sticker dimensions methodology** — Acme made custom stickers, applied to the cow's body; cm size not publicly documented. Recover via Schaeffer back-derivation (see Sticker physical dimensions section).
 - ✓ **Acme's weight model formula** — Schaeffer: `weight_lb = (HG_in × HG_in × BL_in) / 300`. This is the baseline our ML head has to beat.
 
+## Phase 0 baseline findings (2026-05-21)
+
+Two empirical facts from running the forward-Schaeffer baseline + suspect-flagger on Kaggle. Treat both as binding for downstream work.
+
+### Sticker physical size is bimodal — calibrate per batch
+
+The pre-2026-05-21 calibration assumed one global sticker cm² (median 18.21, IQR (14.9, 77.6) — very wide). Running forward Schaeffer with that single constant on the test split produced **MAE 96.27 kg / R² −5.95**, with opposite-sign biases per batch (B3 +47 kg, B4 −150 kg). That's the signature of two stickers, not noise.
+
+Re-deriving the cm² constant **per batch on the train split only** (inverse Schaeffer over keypoints + sticker pixel area, grouped by `sample.batch`) recovers two well-separated constants:
+
+| Batch | Sticker cm² (median over train) |
+|---|---|
+| B3 | **15.27** (~4.41 cm equivalent diameter) |
+| B4 | **79.33** (~10.05 cm equivalent diameter) |
+
+The two batches use **fundamentally different physical stickers** (~5× area difference). Re-running the test-set baseline with per-batch constants drops MAE from 96.27 → **30.25 kg**, MAPE from 60.85% → **19.69%**, and per-batch bias to ~+0.3 kg on both.
+
+**Operational rule:**
+- Never use a single global sticker cm² for this dataset.
+- The committed `data/calibration/sticker_area_cm2_by_batch.json` is the source of truth.
+- Future calibration runs MUST pass `--split-csv data/splits/train.csv` to avoid leaking test labels into the constant.
+- Any new batch (e.g. a hypothetical B5) needs its own re-derivation — do not assume it shares B3's or B4's sticker.
+
+### animal_id is batch-local — confirmed empirically; collision flag is diagnostic only
+
+The parser comment + `KaggleSample.animal_key = (batch, animal_id)` already documented that animal_id is per-batch. The 2026-05-21 suspect-flagger run quantified just how aggressive that namespace collision is:
+
+- **143 distinct animal_ids** appear in 2+ batches.
+- **1051 sample rows** flagged by `cross_batch_id_collision` (>20% labelled-weight disagreement across batches with shared ID).
+- That's **~14% of all unique animals** and **~28% of train+val** by sample count.
+
+This rate cannot be real cross-batch label inconsistency — with label std ~46 kg on mean ~160 kg, any two random animals disagree by >20% most of the time. The collisions are **coincidental numeric ID matches between unrelated animals**, not photos of the same animal labelled twice. B4's `b4-<sub>` infix further partitions IDs within B4 (each sub-batch likely has its own namespace too).
+
+**Operational rule:**
+- `cattle_phenotyping.eval.flag_suspects.DEFAULT_FILTER_FLAGS` deliberately excludes `cross_batch_id_collision`.
+- `load_filter_set(...)` filters on `large_residual ∪ implausible_low_weight` only.
+- The collision flag stays in `suspect_samples.csv` for diagnostic browsing but **must not** be used to drop training rows.
+- For any cross-batch join (e.g. de-duplication, animal-grouped splits), use the tuple key `(batch, animal_id)` — never the bare ID. Considered safer still: `(batch, batch_sub, animal_id)` for B4.
+
+### What the filter actually drops
+
+Under `DEFAULT_FILTER_FLAGS`, the realistic train+val drop list is on the order of **110–115 samples (~3%)**, dominated by `large_residual` (106 train+val) with `implausible_low_weight` (39) mostly a subset. These are the rows where forward Schaeffer disagrees with the label by >100 kg despite correct calibration, or predicts a biologically impossible (<50 kg) weight — both signatures of keypoint failure or sticker-mask contamination, not learnable noise. Drop them from training.
+
 ## Open questions (low priority, do not block Phase 3)
 
 1. **B2 Side anonymous 23-keypoint mapping** in `Side_2/`. Likely in a figure in the PDF (which is text-only extracted) — would need to view the PDF visually. Low priority: we train on B3+B4 side (~4,548 weight-labelled images with the canonical 9-keypoint schema).

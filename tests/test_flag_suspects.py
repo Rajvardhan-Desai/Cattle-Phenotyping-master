@@ -10,6 +10,7 @@ import pytest
 from cattle_phenotyping.data.kaggle import FilenameMeta, KaggleSample
 from cattle_phenotyping.eval.baseline_schaeffer import SchaefferRecord
 from cattle_phenotyping.eval.flag_suspects import (
+    DEFAULT_FILTER_FLAGS,
     FLAG_CROSS_BATCH_ID_COLLISION,
     FLAG_IMPLAUSIBLE_LOW_WEIGHT,
     FLAG_LARGE_RESIDUAL,
@@ -19,6 +20,7 @@ from cattle_phenotyping.eval.flag_suspects import (
     detect_cross_batch_id_collisions,
     detect_implausible_low_weight,
     detect_large_residual,
+    load_filter_set,
     residual_stdev,
     write_suspect_csv,
 )
@@ -292,3 +294,110 @@ def test_write_suspect_csv_creates_parent_dirs(tmp_path):
     out_path = tmp_path / "nested" / "deeper" / "suspect.csv"
     write_suspect_csv([], out_path)
     assert out_path.exists()
+
+
+# ----------------------------------------------------------- load_filter_set
+
+
+def _seed_csv(path: Path) -> None:
+    """Write a representative suspect CSV mirroring the Kaggle output shape."""
+    rows = [
+        # Real defect: belongs in default filter.
+        SuspectRow(
+            image_filename="implausible.jpg", split="train", batch="B3",
+            animal_id="20", labelled_weight_kg=104.0, predicted_weight_kg=1.4,
+            residual_kg=-102.6, residual_sigma_z=-3.4,
+            sticker_area_px=10132, px_per_cm=25.76,
+            flags=[FLAG_LARGE_RESIDUAL, FLAG_IMPLAUSIBLE_LOW_WEIGHT],
+        ),
+        # Real defect (residual only).
+        SuspectRow(
+            image_filename="big_residual.jpg", split="train", batch="B4",
+            animal_id="486", labelled_weight_kg=237.0, predicted_weight_kg=429.0,
+            residual_kg=192.0, residual_sigma_z=4.8,
+            sticker_area_px=4900, px_per_cm=7.86,
+            flags=[FLAG_LARGE_RESIDUAL],
+        ),
+        # Diagnostic-only: collision flag, no real defect → excluded by default.
+        SuspectRow(
+            image_filename="collision_only.jpg", split="val", batch="B3",
+            animal_id="314", labelled_weight_kg=325.0, predicted_weight_kg=300.0,
+            residual_kg=-25.0, residual_sigma_z=-0.6,
+            sticker_area_px=900, px_per_cm=7.7,
+            flags=[FLAG_CROSS_BATCH_ID_COLLISION],
+        ),
+        # Composed flags: collision AND a real defect → included by default.
+        SuspectRow(
+            image_filename="collision_plus_residual.jpg", split="train", batch="B4",
+            animal_id="314", labelled_weight_kg=181.0, predicted_weight_kg=312.0,
+            residual_kg=131.0, residual_sigma_z=3.3,
+            sticker_area_px=6886, px_per_cm=9.32,
+            flags=[FLAG_LARGE_RESIDUAL, FLAG_CROSS_BATCH_ID_COLLISION],
+        ),
+    ]
+    write_suspect_csv(rows, path)
+
+
+def test_load_filter_set_default_excludes_collision_only(tmp_path):
+    csv_path = tmp_path / "suspect.csv"
+    _seed_csv(csv_path)
+    drop = load_filter_set(csv_path)
+    # collision_only.jpg has ONLY the diagnostic flag → must not appear.
+    assert drop == {"implausible.jpg", "big_residual.jpg", "collision_plus_residual.jpg"}
+
+
+def test_load_filter_set_default_flags_documents_intent():
+    """Pin the default set so a future drift is loud."""
+    assert DEFAULT_FILTER_FLAGS == frozenset({
+        FLAG_LARGE_RESIDUAL,
+        FLAG_IMPLAUSIBLE_LOW_WEIGHT,
+    })
+
+
+def test_load_filter_set_custom_flags_can_include_collision(tmp_path):
+    """If a caller deliberately wants the collision flag treated as a filter."""
+    csv_path = tmp_path / "suspect.csv"
+    _seed_csv(csv_path)
+    drop = load_filter_set(csv_path, flags={FLAG_CROSS_BATCH_ID_COLLISION})
+    # Both collision rows in.
+    assert drop == {"collision_only.jpg", "collision_plus_residual.jpg"}
+
+
+def test_load_filter_set_custom_flags_can_be_strict(tmp_path):
+    """A caller can also opt to filter on a single flag."""
+    csv_path = tmp_path / "suspect.csv"
+    _seed_csv(csv_path)
+    drop = load_filter_set(csv_path, flags={FLAG_IMPLAUSIBLE_LOW_WEIGHT})
+    assert drop == {"implausible.jpg"}
+
+
+def test_load_filter_set_missing_file_returns_empty(tmp_path):
+    """A fresh repo without calibration artifacts shouldn't break training."""
+    drop = load_filter_set(tmp_path / "nope.csv")
+    assert drop == set()
+
+
+def test_load_filter_set_missing_columns_raises(tmp_path):
+    bad = tmp_path / "bad.csv"
+    bad.write_text("foo,bar\n1,2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="image_filename"):
+        load_filter_set(bad)
+
+
+def test_load_filter_set_empty_csv_returns_empty(tmp_path):
+    csv_path = tmp_path / "empty.csv"
+    write_suspect_csv([], csv_path)
+    assert load_filter_set(csv_path) == set()
+
+
+def test_load_filter_set_handles_empty_flags_cell(tmp_path):
+    """A row with an empty flags column (shouldn't normally happen) is ignored."""
+    csv_path = tmp_path / "edge.csv"
+    csv_path.write_text(
+        "image_filename,split,batch,animal_id,labelled_weight_kg,"
+        "predicted_weight_kg,residual_kg,residual_sigma_z,sticker_area_px,"
+        "px_per_cm,flags\n"
+        "ghost.jpg,train,B3,42,200.0,,,,,,\n",  # all-empty trailing fields
+        encoding="utf-8",
+    )
+    assert load_filter_set(csv_path) == set()

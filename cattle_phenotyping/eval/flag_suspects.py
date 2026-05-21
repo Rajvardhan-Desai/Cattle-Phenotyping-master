@@ -15,6 +15,16 @@ MAE on test, the outlier list surfaced two recurring failure modes:
    likely *different* animals sharing an ID, not the same animal weighed
    twice. Either way, both labels can't be trusted in isolation.
 
+**2026-05-21 update: cross-batch ID collisions are noise, not signal.** Running
+this module on the full splits surfaced 143 colliding animal_ids covering 1051
+sample rows (~28% of train+val) — far too many to be real label errors. With
+label std ~46 kg on mean ~160 kg, ANY two random animals will disagree by >20%
+most of the time, so the cross-batch flag is essentially catching numeric ID
+coincidences between unrelated animals. The real Kaggle ``animal_id`` namespace
+is per-batch (and likely per B4 sub-batch — see ``b4-<sub>`` infix). The flag
+is preserved in the CSV for diagnostic use but is **excluded by default** from
+:func:`load_filter_set`. See ``docs/kaggle_dataset_notes.md`` § ID namespace.
+
 This module materializes those flags into ``data/calibration/suspect_samples.csv``
 so the keypoint-training notebook can opt-in to filter or down-weight them.
 It does **not** modify the split CSVs — the splits stay deterministic and
@@ -70,6 +80,17 @@ DEFAULT_CROSS_BATCH_DISAGREEMENT_PCT = 20.0
 FLAG_LARGE_RESIDUAL = "large_residual"
 FLAG_IMPLAUSIBLE_LOW_WEIGHT = "implausible_low_weight"
 FLAG_CROSS_BATCH_ID_COLLISION = "cross_batch_id_collision"
+
+# Flags that indicate a genuine per-sample defect and are safe to use as a
+# training filter. ``cross_batch_id_collision`` is INFORMATIONAL ONLY — see
+# the 2026-05-21 finding documented in docs/kaggle_dataset_notes.md: the
+# Kaggle dataset's ``animal_id`` namespace is per-batch (and likely per
+# B4 sub-batch), so cross-batch ID collisions are almost always coincidences
+# between unrelated animals, not mislabeled photos of the same animal.
+DEFAULT_FILTER_FLAGS: frozenset[str] = frozenset({
+    FLAG_LARGE_RESIDUAL,
+    FLAG_IMPLAUSIBLE_LOW_WEIGHT,
+})
 
 
 # ----------------------------------------------------------------- data types
@@ -305,6 +326,61 @@ def write_suspect_csv(rows: Iterable[SuspectRow], output: Path) -> int:
             ])
             n += 1
     return n
+
+
+# --------------------------------------------------- training-time filter API
+
+
+def load_filter_set(
+    csv_path: Path,
+    *,
+    flags: Iterable[str] = DEFAULT_FILTER_FLAGS,
+) -> set[str]:
+    """Return the set of ``image_filename`` strings to exclude from training.
+
+    Parses the suspect-samples CSV written by :func:`run` / :func:`write_suspect_csv`
+    and emits every row whose pipe-separated ``flags`` column intersects the
+    given filter set.
+
+    The default :data:`DEFAULT_FILTER_FLAGS` includes only the genuine-defect
+    flags (``large_residual`` and ``implausible_low_weight``). The
+    ``cross_batch_id_collision`` flag is **intentionally excluded** — see the
+    module docstring and ``docs/kaggle_dataset_notes.md`` for why those
+    collisions are diagnostic noise, not training-set contamination.
+
+    Typical use from a training notebook::
+
+        from cattle_phenotyping.eval.flag_suspects import load_filter_set
+        drop = load_filter_set("data/calibration/suspect_samples.csv")
+        train_df = train_df[~train_df["image_filename"].isin(drop)]
+
+    Returns an empty set if the CSV doesn't exist (so a training pipeline
+    survives a fresh repo where the calibration step hasn't been run yet —
+    the caller can log a warning).
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        log.warning(
+            "Suspect-samples CSV not found at %s — returning empty filter set. "
+            "Re-run cattle_phenotyping.eval.flag_suspects to generate it.",
+            csv_path,
+        )
+        return set()
+
+    wanted = frozenset(flags)
+    drop: set[str] = set()
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if "image_filename" not in (reader.fieldnames or ()) or "flags" not in (reader.fieldnames or ()):
+            raise ValueError(
+                f"Suspect CSV {csv_path} missing required columns "
+                f"'image_filename' and/or 'flags'; got {reader.fieldnames}"
+            )
+        for row in reader:
+            row_flags = {f for f in row["flags"].split("|") if f}
+            if row_flags & wanted:
+                drop.add(row["image_filename"])
+    return drop
 
 
 # -------------------------------------------------------------------- driver
